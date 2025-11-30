@@ -86,14 +86,16 @@ class AgentDaemon:
 
     async def _handle_execute_task(self, payload: dict):
         """Handle task execution request from controller"""
+        logger.info("execute_task_received", payload_keys=list(payload.keys()))
+
         task_id = payload.get("task_id")
         plan_data = payload.get("plan")
 
         if not task_id or not plan_data:
-            logger.error("invalid_execute_task", payload=payload)
+            logger.error("invalid_execute_task", payload=payload, task_id=task_id, has_plan=bool(plan_data))
             return
 
-        logger.info("executing_task", task_id=task_id)
+        logger.info("executing_task", task_id=task_id, commands=len(plan_data.get("commands", [])))
         self._current_task_id = task_id
         self.connection.set_current_task(task_id)
 
@@ -131,6 +133,7 @@ class AgentDaemon:
             final_error = "\n".join(r.stderr for r in results if r.stderr)
             final_exit_code = results[-1].exit_code if results else 0
 
+            logger.info("sending_task_complete", task_id=task_id, success=success, exit_code=final_exit_code)
             await self.connection.send("task_complete", {
                 "task_id": task_id,
                 "success": success,

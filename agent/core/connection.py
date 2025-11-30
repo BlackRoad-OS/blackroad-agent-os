@@ -145,7 +145,7 @@ class ControllerConnection:
             msg_type = message.get("type")
             payload = message.get("payload", {})
 
-            logger.debug("message_received", type=msg_type)
+            logger.info("message_received", type=msg_type, has_payload=bool(payload))
 
             # Check for registered handler
             if msg_type in self._handlers:

@@ -131,8 +131,14 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint"""
+    from services.planner_config import PlannerConfig
+    config = PlannerConfig.from_env()
+
     return {
         "status": "healthy",
+        "planner": {
+            "provider": config.provider.value,
+        },
         "agents": {
             "total": len(registry.get_all()),
             "online": len(registry.get_online()),

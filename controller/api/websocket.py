@@ -130,6 +130,8 @@ async def handle_task_complete(payload: dict):
     output = payload.get("output")
     error = payload.get("error")
 
+    logger.info("task_complete_received", task_id=task_id, success=success, exit_code=exit_code)
+
     await scheduler.complete_task(
         task_id=task_id,
         success=success,
@@ -249,10 +251,14 @@ async def dispatch_loop():
                 # Send task to agent
                 agent_id = task.assigned_agent_id
                 if agent_id:
+                    # Send task to agent with payload wrapper for consistency
+                    logger.info("dispatching_task_to_agent", task_id=task.id, agent_id=agent_id)
                     success = await registry.send_to_agent(agent_id, {
                         "type": "execute_task",
-                        "task_id": task.id,
-                        "plan": task.plan.model_dump() if task.plan else None,
+                        "payload": {
+                            "task_id": task.id,
+                            "plan": task.plan.model_dump() if task.plan else None,
+                        }
                     })
 
                     if not success:

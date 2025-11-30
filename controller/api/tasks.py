@@ -8,7 +8,8 @@ import structlog
 from models import Task, TaskStatus, TaskRequest, TaskApproval, TaskPlan
 from core.scheduler import scheduler
 from core.registry import registry
-from services.llm import create_llm_service
+from services.planner import create_planner
+from services.planner_config import PlannerConfig
 from services.audit import audit
 import os
 
@@ -96,12 +97,12 @@ async def plan_task(task_id: str, request: TaskRequest):
             )
             return
 
-        # Create LLM service
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        llm = create_llm_service(api_key)
+        # Create planner with auto-detected provider
+        planner = create_planner()
+        logger.info("planning_with_provider", provider=planner.provider, task_id=task_id)
 
         # Generate plan
-        plan = await llm.create_plan(
+        plan = await planner.create_plan(
             request=request.request,
             agents=agents,
             target_agent_id=request.target_agent_id,
