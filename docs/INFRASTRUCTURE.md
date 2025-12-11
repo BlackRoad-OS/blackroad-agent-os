@@ -1,6 +1,7 @@
 # BlackRoad Agent OS - Infrastructure Configuration
 
-This document tracks all infrastructure services, credentials, and configurations.
+This document describes infrastructure architecture and setup guides.
+**Note:** All sensitive credentials must be stored in environment variables or secret managers - never in code.
 
 ## Overview
 
@@ -14,39 +15,32 @@ This document tracks all infrastructure services, credentials, and configuration
 │  │  (Mac/Cloud) │    │   Tunnel     │    │   (Deploy)   │      │
 │  └──────┬───────┘    └──────────────┘    └──────────────┘      │
 │         │                                                       │
-│         │ WebSocket                                             │
+│         │ WebSocket (WSS)                                       │
 │         ▼                                                       │
 │  ┌──────────────┐    ┌──────────────┐                          │
-│  │ blackroad-pi │    │    alice     │    ... more Pi agents    │
-│  │ (lucidia)    │    │ (raspberrypi)│                          │
+│  │   Agent 1    │    │   Agent 2    │    ... more Pi agents    │
+│  │  (Primary)   │    │ (Secondary)  │                          │
 │  └──────────────┘    └──────────────┘                          │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Cloudflare Tunnel
+## Cloudflare Tunnel Setup
 
-### Account Details
-- **Account ID:** `848cf0b18d51e0170e0d1537aec3505a`
-- **Zone:** blackroad.ai
+### Configuration
+Cloudflare Tunnel provides secure, authenticated access to the controller without exposing ports.
 
-### Tunnel Details
-- **Tunnel ID:** `52915859-da18-4aa6-add5-7bd9fcac2e0b`
-- **Tunnel Name:** blackroad
-- **Status:** Active, running on blackroad-pi
-- **Protocol:** QUIC
-- **Edge Location:** dfw08 (Dallas)
-
-### Connected Nodes
-| Node | Hostname | Status | Connection |
-|------|----------|--------|------------|
-| blackroad-pi | lucidia.local | Active | quic via dfw08 |
-| alice | raspberrypi | Pending | - |
+Required environment variables:
+```bash
+CLOUDFLARE_ACCOUNT_ID=<your-account-id>
+CLOUDFLARE_TUNNEL_ID=<your-tunnel-id>
+CLOUDFLARE_TUNNEL_TOKEN=<your-tunnel-token>
+```
 
 ### Tunnel Token
 The tunnel runs with a token-based configuration (no local config file needed):
 ```bash
-cloudflared --no-autoupdate tunnel run --token <TOKEN>
+cloudflared --no-autoupdate tunnel run --token $CLOUDFLARE_TUNNEL_TOKEN
 ```
 
 ### Systemd Service (on Pi)
@@ -59,7 +53,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run --token <TOKEN>
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+EnvironmentFile=/etc/cloudflared/env
 Restart=on-failure
 RestartSec=5s
 
@@ -84,33 +79,26 @@ sudo systemctl status cloudflared
 ### Ingress Routes (configure in Cloudflare dashboard)
 ```yaml
 ingress:
-  - hostname: agent.blackroad.ai
+  - hostname: agent.your-domain.com
     service: http://localhost:8000
-  - hostname: api.blackroad.ai
+  - hostname: api.your-domain.com
     service: http://localhost:8000
   - service: http_status:404
 ```
 
-## Railway Projects
+## Platform Deployments
 
-### Organization: BlackRoad OS, Inc.
-- **Account:** Alexa Amundson (amundsonalexa@gmail.com)
+### Railway Projects
+Configure via Railway dashboard or CLI.
 
-| Project | Purpose | Status |
-|---------|---------|--------|
-| blackroad-operating-system | Main OS services | Active |
-| blackroad-os-core | Core OS components | Active |
-| blackroad-os-web | Web interfaces | Active |
-| blackroad-os-api | API services | Active |
-| blackroad-os-docs | Documentation | Active |
-| blackroad-os-operator | Operator services | Active |
-| blackroad-os-prism-console | Prism console | Active |
-| railway-blackroad-os | Secondary deployment | - |
-| kind-unity | Sandbox | - |
-| noble-gentleness | Sandbox | - |
-| sincere-recreation | Sandbox | - |
-| fabulous-connection | Sandbox | - |
-| gregarious-wonder | Sandbox | - |
+| Project Type | Purpose |
+|--------------|---------|
+| operating-system | Main OS services |
+| core | Core components |
+| web | Web interfaces |
+| api | API services |
+| docs | Documentation |
+| operator | Operator services |
 
 ### Deployment Commands
 ```bash
@@ -127,28 +115,32 @@ railway up
 railway logs
 ```
 
-## Raspberry Pi Agents
+## Raspberry Pi Agent Setup
 
-### blackroad-pi (Primary)
-- **Hostname:** lucidia.local
-- **IP:** 192.168.4.64
-- **User:** pi
-- **Status:** Online, connected to controller
-- **Cloudflared:** Running (tunnel connector)
-- **Agent ID:** blackroad-pi
-- **Uptime:** 38+ days
+### Primary Agent Setup
+```bash
+# Set environment variables
+export AGENT_ID="agent-primary"
+export CONTROLLER_URL="wss://api.your-domain.com/ws/agent"
+export AGENT_TOKEN="<secure-token>"  # Required for authentication
+export AGENT_ROLES="web,worker"
+export AGENT_TAGS="production"
+```
 
-### alice (Secondary)
-- **Hostname:** raspberrypi.local
-- **IP:** 192.168.4.49
-- **User:** alice
-- **Password:** alice
-- **Status:** Pending setup
-- **Cloudflared:** Needs configuration
+### Secondary Agent Setup
+```bash
+export AGENT_ID="agent-secondary"
+export CONTROLLER_URL="wss://api.your-domain.com/ws/agent"
+export AGENT_TOKEN="<secure-token>"
+export AGENT_ROLES="worker"
+export AGENT_TAGS="staging"
+```
+
+**Security Note:** Always change default credentials and use strong, unique passwords for each agent.
 
 ## GitHub Repositories
 
-### Organization: BlackRoad-OS
+### Organization Structure
 
 | Repository | Description |
 |------------|-------------|
@@ -163,33 +155,40 @@ railway logs
 Each Pi should have an SSH key added to GitHub for GitOps sync:
 ```bash
 # Generate key on Pi
-ssh-keygen -t ed25519 -C "blackroad-pi@github"
+ssh-keygen -t ed25519 -C "agent@github"
 
-# Add to GitHub
-gh repo deploy-key add ~/.ssh/id_ed25519.pub -R BlackRoad-OS/blackroad-agent-os
+# Add to GitHub (replace with your repo)
+gh repo deploy-key add ~/.ssh/id_ed25519.pub -R YourOrg/your-repo
 ```
 
-## Environment Variables
+## Environment Variables Reference
 
 ### Controller (.env)
 ```bash
 # Server
 PORT=8000
 
+# Authentication (REQUIRED)
+API_SECRET_KEY=<generate-secure-key>
+AGENT_AUTH_TOKEN=<shared-agent-token>
+
+# CORS (configure for your domains)
+CORS_ORIGINS=https://app.your-domain.com,https://api.your-domain.com
+
 # LLM Provider (auto-detected if not set)
 # PLANNER_PROVIDER=anthropic|openai|mistral|ollama|stub
 
 # Anthropic
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=<your-key>
 
 # OpenAI
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=<your-key>
 
 # Mistral
-MISTRAL_API_KEY=...
+MISTRAL_API_KEY=<your-key>
 
-# HuggingFace
-HF_API_TOKEN=hf_...
+# HuggingFace / Open Source Models
+HF_API_TOKEN=<your-token>
 
 # Ollama (local)
 OLLAMA_BASE_URL=http://localhost:11434
@@ -198,8 +197,9 @@ OLLAMA_MODEL=llama3
 
 ### Agent (on each Pi)
 ```bash
-AGENT_ID=blackroad-pi
-CONTROLLER_URL=ws://controller-host:8000/ws/agent
+AGENT_ID=<unique-agent-id>
+CONTROLLER_URL=wss://api.your-domain.com/ws/agent
+AGENT_TOKEN=<auth-token>
 AGENT_ROLES=web,worker
 AGENT_TAGS=production
 ```
@@ -227,20 +227,20 @@ Located on each Pi at `/etc/systemd/system/`:
 Internet
     │
     ▼
-Cloudflare Edge (*.blackroad.ai)
+Cloudflare Edge (*.your-domain.com)
     │
-    ▼ (Tunnel: 52915859-da18-4aa6-add5-7bd9fcac2e0b)
+    ▼ (Tunnel: encrypted connection)
     │
-blackroad-pi (192.168.4.64)
+Primary Agent (192.168.x.x)
     │
     ├── Controller (port 8000) ◄── WebSocket ──┐
     │                                          │
     │                                          │
-Local Network (192.168.4.0/24)                 │
+Local Network (192.168.x.0/24)                 │
     │                                          │
-    ├── blackroad-pi agent ────────────────────┤
+    ├── Primary agent ─────────────────────────┤
     │                                          │
-    └── alice agent (192.168.4.49) ────────────┘
+    └── Secondary agent ───────────────────────┘
 ```
 
 ## Useful Commands
@@ -274,26 +274,38 @@ railway up
 # Check controller health
 curl http://localhost:8000/health
 
-# List connected agents
-curl http://localhost:8000/api/agents
+# List connected agents (requires auth header in production)
+curl -H "Authorization: Bearer $API_TOKEN" http://localhost:8000/api/agents
 
-# Submit a task
+# Submit a task (requires auth header in production)
 curl -X POST http://localhost:8000/api/tasks \
+  -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"request": "check uptime", "skip_approval": true}'
 ```
 
 ## Secrets Management
 
-**IMPORTANT:** Never commit secrets to git. Use:
-1. Environment variables
-2. `.env` files (gitignored)
-3. Railway/Cloudflare dashboards for production
+**CRITICAL:** Never commit secrets to git. Use:
+1. Environment variables with `.env` files (gitignored)
+2. Secret managers (Doppler, Vault, AWS Secrets Manager)
+3. Platform secret storage (Railway, Cloudflare, GitHub Secrets)
 
 ### Required Secrets
-| Secret | Location | Purpose |
-|--------|----------|---------|
-| ANTHROPIC_API_KEY | Controller .env | LLM planning |
-| OPENAI_API_KEY | Controller .env | LLM planning |
-| CLOUDFLARE_API_TOKEN | Local env | Tunnel management |
-| Tunnel Token | Pi systemd | Cloudflare tunnel auth |
+| Secret | Purpose | Storage Location |
+|--------|---------|------------------|
+| API_SECRET_KEY | JWT signing | Controller .env |
+| AGENT_AUTH_TOKEN | Agent authentication | Controller + Agent .env |
+| ANTHROPIC_API_KEY | LLM planning | Controller .env |
+| OPENAI_API_KEY | LLM planning | Controller .env |
+| CLOUDFLARE_API_TOKEN | Tunnel management | GitHub Secrets |
+| CLOUDFLARE_TUNNEL_TOKEN | Tunnel auth | Pi systemd env |
+
+### Generating Secure Tokens
+```bash
+# Generate a secure API secret key
+openssl rand -base64 32
+
+# Generate agent auth token
+openssl rand -hex 32
+```

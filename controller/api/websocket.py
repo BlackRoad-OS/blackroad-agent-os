@@ -10,6 +10,7 @@ import structlog
 from models import AgentRegistration, AgentHeartbeat, CommandResult, Task
 from core.registry import registry
 from core.scheduler import scheduler
+from core.auth import authenticate_agent_websocket, authenticate_websocket, get_auth_config
 from services.audit import audit
 
 router = APIRouter(tags=["websocket"])
@@ -24,7 +25,17 @@ async def agent_websocket(websocket: WebSocket):
     """
     WebSocket endpoint for agent connections.
     Agents connect here to register, receive tasks, and send results.
+    Requires authentication via token query parameter.
     """
+    # Authenticate before accepting
+    auth_config = get_auth_config()
+    if auth_config.auth_enabled:
+        is_authenticated, _ = await authenticate_agent_websocket(websocket)
+        if not is_authenticated:
+            await websocket.close(code=4001, reason="Authentication required")
+            logger.warning("agent_connection_rejected", reason="no_auth", client=str(websocket.client))
+            return
+
     await websocket.accept()
     agent_id: Optional[str] = None
 
@@ -182,7 +193,17 @@ async def client_websocket(websocket: WebSocket):
     """
     WebSocket endpoint for UI clients.
     Receives real-time updates about agents and tasks.
+    Requires authentication via token query parameter.
     """
+    # Authenticate before accepting
+    auth_config = get_auth_config()
+    if auth_config.auth_enabled:
+        is_authenticated = await authenticate_websocket(websocket)
+        if not is_authenticated:
+            await websocket.close(code=4001, reason="Authentication required")
+            logger.warning("client_connection_rejected", reason="no_auth", client=str(websocket.client))
+            return
+
     await websocket.accept()
     client_connections.append(websocket)
     logger.info("client_connected", total_clients=len(client_connections))
