@@ -2,12 +2,13 @@
 Task API Routes - Create, manage, and monitor tasks
 """
 from typing import Optional
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 import structlog
 
 from models import Task, TaskStatus, TaskRequest, TaskApproval, TaskPlan
 from core.scheduler import scheduler
 from core.registry import registry
+from core.auth import get_current_user, TokenPayload
 from services.planner import create_planner
 from services.planner_config import PlannerConfig
 from services.audit import audit
@@ -22,8 +23,9 @@ async def list_tasks(
     status: Optional[TaskStatus] = None,
     agent_id: Optional[str] = None,
     limit: int = 50,
+    current_user: TokenPayload = Depends(get_current_user),
 ):
-    """List all tasks with optional filters"""
+    """List all tasks with optional filters (requires authentication)"""
     tasks = scheduler.get_all_tasks()
 
     if status:
@@ -37,27 +39,36 @@ async def list_tasks(
 
 
 @router.get("/queue", response_model=list[Task])
-async def get_queue():
-    """Get tasks currently in the queue"""
+async def get_queue(
+    current_user: TokenPayload = Depends(get_current_user),
+):
+    """Get tasks currently in the queue (requires authentication)"""
     return scheduler.get_queued_tasks()
 
 
 @router.get("/running", response_model=list[Task])
-async def get_running():
-    """Get currently running tasks"""
+async def get_running(
+    current_user: TokenPayload = Depends(get_current_user),
+):
+    """Get currently running tasks (requires authentication)"""
     return scheduler.get_running_tasks()
 
 
 @router.get("/awaiting-approval", response_model=list[Task])
-async def get_awaiting_approval():
-    """Get tasks awaiting user approval"""
+async def get_awaiting_approval(
+    current_user: TokenPayload = Depends(get_current_user),
+):
+    """Get tasks awaiting user approval (requires authentication)"""
     tasks = scheduler.get_all_tasks()
     return [t for t in tasks if t.status == TaskStatus.AWAITING_APPROVAL]
 
 
 @router.get("/{task_id}", response_model=Task)
-async def get_task(task_id: str):
-    """Get a specific task by ID"""
+async def get_task(
+    task_id: str,
+    current_user: TokenPayload = Depends(get_current_user),
+):
+    """Get a specific task by ID (requires authentication)"""
     task = scheduler.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
@@ -65,10 +76,15 @@ async def get_task(task_id: str):
 
 
 @router.post("", response_model=Task)
-async def create_task(request: TaskRequest, background_tasks: BackgroundTasks):
+async def create_task(
+    request: TaskRequest,
+    background_tasks: BackgroundTasks,
+    current_user: TokenPayload = Depends(get_current_user),
+):
     """
     Create a new task from a natural language request.
     The task will be planned by the LLM and then queued for approval.
+    Requires authentication.
     """
     # Create the task
     task = await scheduler.create_task(request)
@@ -129,8 +145,12 @@ async def plan_task(task_id: str, request: TaskRequest):
 
 
 @router.post("/{task_id}/approve", response_model=Task)
-async def approve_task(task_id: str, approval: TaskApproval):
-    """Approve or reject a task plan"""
+async def approve_task(
+    task_id: str,
+    approval: TaskApproval,
+    current_user: TokenPayload = Depends(get_current_user),
+):
+    """Approve or reject a task plan (requires authentication)"""
     try:
         task = await scheduler.approve_task(
             task_id,
@@ -138,11 +158,11 @@ async def approve_task(task_id: str, approval: TaskApproval):
             reason=approval.reason,
         )
 
-        # Log audit
+        # Log audit with approver info
         if approval.approved:
-            audit.log_task_approved(task_id)
+            audit.log_task_approved(task_id, approver=current_user.sub)
         else:
-            audit.log_task_rejected(task_id, approval.reason or "No reason provided")
+            audit.log_task_rejected(task_id, approval.reason or "No reason provided", rejector=current_user.sub)
 
         return task
     except ValueError as e:
@@ -150,8 +170,12 @@ async def approve_task(task_id: str, approval: TaskApproval):
 
 
 @router.post("/{task_id}/cancel", response_model=Task)
-async def cancel_task(task_id: str, reason: Optional[str] = None):
-    """Cancel a task"""
+async def cancel_task(
+    task_id: str,
+    reason: Optional[str] = None,
+    current_user: TokenPayload = Depends(get_current_user),
+):
+    """Cancel a task (requires authentication)"""
     try:
         return await scheduler.cancel_task(task_id, reason)
     except ValueError as e:
@@ -159,8 +183,12 @@ async def cancel_task(task_id: str, reason: Optional[str] = None):
 
 
 @router.post("/{task_id}/retry", response_model=Task)
-async def retry_task(task_id: str, background_tasks: BackgroundTasks):
-    """Retry a failed task"""
+async def retry_task(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: TokenPayload = Depends(get_current_user),
+):
+    """Retry a failed task (requires authentication)"""
     task = scheduler.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")

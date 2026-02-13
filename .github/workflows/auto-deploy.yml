@@ -1,0 +1,274 @@
+name: Auto Deploy
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, master]
+
+env:
+  # Railway
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  # Cloudflare
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  # DigitalOcean
+  DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+  DO_APP_ID: ${{ secrets.DO_APP_ID }}
+  # Vercel
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+jobs:
+  detect-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      deployments: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Detect Project Type
+        id: detect
+        run: |
+          # Detect what kind of project this is based on config files
+          # Priority order: explicit config > framework detection > defaults
+
+          # Check for explicit platform configs
+          if [ -f "vercel.json" ]; then
+            echo "platform=vercel" >> $GITHUB_OUTPUT
+          elif [ -f "railway.toml" ] || [ -f "railway.json" ]; then
+            echo "platform=railway" >> $GITHUB_OUTPUT
+          elif [ -f ".do/app.yaml" ] || [ -f "app.yaml" ]; then
+            echo "platform=digitalocean" >> $GITHUB_OUTPUT
+          elif [ -f "wrangler.toml" ] || [ -f "wrangler.json" ]; then
+            echo "platform=cloudflare-workers" >> $GITHUB_OUTPUT
+          # Framework detection
+          elif [ -f "next.config.js" ] || [ -f "next.config.mjs" ] || [ -f "next.config.ts" ]; then
+            # Next.js can deploy to Vercel or Cloudflare
+            if [ -n "$VERCEL_TOKEN" ]; then
+              echo "platform=vercel" >> $GITHUB_OUTPUT
+            else
+              echo "platform=cloudflare-pages" >> $GITHUB_OUTPUT
+            fi
+            echo "framework=next" >> $GITHUB_OUTPUT
+          elif [ -f "vite.config.ts" ] || [ -f "vite.config.js" ]; then
+            echo "platform=cloudflare-pages" >> $GITHUB_OUTPUT
+            echo "framework=vite" >> $GITHUB_OUTPUT
+          elif [ -f "Dockerfile" ]; then
+            # Docker projects prefer Railway or DigitalOcean
+            if [ -n "$DIGITALOCEAN_TOKEN" ] && [ -n "$DO_APP_ID" ]; then
+              echo "platform=digitalocean" >> $GITHUB_OUTPUT
+            else
+              echo "platform=railway" >> $GITHUB_OUTPUT
+            fi
+            echo "framework=docker" >> $GITHUB_OUTPUT
+          elif [ -f "requirements.txt" ] || [ -f "pyproject.toml" ]; then
+            echo "platform=railway" >> $GITHUB_OUTPUT
+            echo "framework=python" >> $GITHUB_OUTPUT
+          elif [ -f "package.json" ]; then
+            echo "platform=cloudflare-pages" >> $GITHUB_OUTPUT
+            echo "framework=static" >> $GITHUB_OUTPUT
+          else
+            echo "platform=railway" >> $GITHUB_OUTPUT
+          fi
+
+          # Get repo name for service naming
+          echo "repo_name=${GITHUB_REPOSITORY#*/}" >> $GITHUB_OUTPUT
+
+          # Set environment based on event
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "environment=preview" >> $GITHUB_OUTPUT
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          else
+            echo "environment=production" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Dependencies
+        if: steps.detect.outputs.platform == 'cloudflare-pages' || steps.detect.outputs.platform == 'cloudflare-workers'
+        run: |
+          if [ -f "package.json" ]; then
+            npm ci || npm install
+          fi
+
+      - name: Build (if needed)
+        if: steps.detect.outputs.platform == 'cloudflare-pages'
+        run: |
+          if [ -f "package.json" ]; then
+            npm run build || true
+          fi
+
+      # ============ RAILWAY DEPLOYMENT ============
+      - name: Install Railway CLI
+        if: steps.detect.outputs.platform == 'railway' && env.RAILWAY_TOKEN != ''
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        if: steps.detect.outputs.platform == 'railway' && env.RAILWAY_TOKEN != ''
+        id: railway
+        run: |
+          railway link --environment ${{ steps.detect.outputs.environment }} 2>/dev/null || true
+          DEPLOY_URL=$(railway up --detach 2>&1 | grep -oP 'https://[^\s]+' | head -1 || echo "")
+          if [ -n "$DEPLOY_URL" ]; then
+            echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            DEPLOY_URL=$(railway status --json 2>/dev/null | jq -r '.deployments[0].url // empty' || echo "")
+            echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+            echo "success=true" >> $GITHUB_OUTPUT
+          fi
+
+      # ============ CLOUDFLARE PAGES DEPLOYMENT ============
+      - name: Deploy to Cloudflare Pages
+        if: steps.detect.outputs.platform == 'cloudflare-pages' && env.CLOUDFLARE_API_TOKEN != ''
+        id: cloudflare-pages
+        run: |
+          npm install -g wrangler
+          if [ -d "dist" ]; then OUTPUT_DIR="dist"
+          elif [ -d "build" ]; then OUTPUT_DIR="build"
+          elif [ -d "out" ]; then OUTPUT_DIR="out"
+          elif [ -d ".next" ]; then OUTPUT_DIR=".next"
+          elif [ -d "public" ]; then OUTPUT_DIR="public"
+          else OUTPUT_DIR="."; fi
+
+          PROJECT_NAME="${{ steps.detect.outputs.repo_name }}"
+          wrangler pages project create "$PROJECT_NAME" --production-branch main 2>/dev/null || true
+
+          if [ "${{ steps.detect.outputs.environment }}" == "preview" ]; then
+            RESULT=$(wrangler pages deploy "$OUTPUT_DIR" --project-name="$PROJECT_NAME" --branch="pr-${{ steps.detect.outputs.pr_number }}" 2>&1)
+          else
+            RESULT=$(wrangler pages deploy "$OUTPUT_DIR" --project-name="$PROJECT_NAME" --branch=main 2>&1)
+          fi
+
+          DEPLOY_URL=$(echo "$RESULT" | grep -oP 'https://[^\s]+\.pages\.dev' | head -1 || echo "")
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+          echo "success=true" >> $GITHUB_OUTPUT
+
+      # ============ CLOUDFLARE WORKERS DEPLOYMENT ============
+      - name: Deploy to Cloudflare Workers
+        if: steps.detect.outputs.platform == 'cloudflare-workers' && env.CLOUDFLARE_API_TOKEN != ''
+        id: cloudflare-workers
+        run: |
+          npm install -g wrangler
+          if [ "${{ steps.detect.outputs.environment }}" == "preview" ]; then
+            RESULT=$(wrangler deploy --env preview 2>&1 || wrangler deploy 2>&1)
+          else
+            RESULT=$(wrangler deploy 2>&1)
+          fi
+          DEPLOY_URL=$(echo "$RESULT" | grep -oP 'https://[^\s]+\.workers\.dev' | head -1 || echo "")
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+          echo "success=true" >> $GITHUB_OUTPUT
+
+      # ============ VERCEL DEPLOYMENT ============
+      - name: Install Vercel CLI
+        if: steps.detect.outputs.platform == 'vercel' && env.VERCEL_TOKEN != ''
+        run: npm install -g vercel
+
+      - name: Deploy to Vercel
+        if: steps.detect.outputs.platform == 'vercel' && env.VERCEL_TOKEN != ''
+        id: vercel
+        run: |
+          if [ "${{ steps.detect.outputs.environment }}" == "preview" ]; then
+            DEPLOY_URL=$(vercel deploy --token=${{ env.VERCEL_TOKEN }} 2>&1 | grep -oP 'https://[^\s]+\.vercel\.app' | head -1 || echo "")
+          else
+            DEPLOY_URL=$(vercel deploy --prod --token=${{ env.VERCEL_TOKEN }} 2>&1 | grep -oP 'https://[^\s]+\.vercel\.app' | head -1 || echo "")
+          fi
+          echo "url=$DEPLOY_URL" >> $GITHUB_OUTPUT
+          echo "success=true" >> $GITHUB_OUTPUT
+
+      # ============ DIGITALOCEAN APP PLATFORM DEPLOYMENT ============
+      - name: Install doctl CLI
+        if: steps.detect.outputs.platform == 'digitalocean' && env.DIGITALOCEAN_TOKEN != ''
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ env.DIGITALOCEAN_TOKEN }}
+
+      - name: Deploy to DigitalOcean App Platform
+        if: steps.detect.outputs.platform == 'digitalocean' && env.DIGITALOCEAN_TOKEN != '' && env.DO_APP_ID != ''
+        id: digitalocean
+        run: |
+          # Trigger deployment
+          doctl apps create-deployment ${{ env.DO_APP_ID }} --wait
+          # Get the deployment URL
+          DEPLOY_URL=$(doctl apps get ${{ env.DO_APP_ID }} --format DefaultIngress --no-header)
+          echo "url=https://$DEPLOY_URL" >> $GITHUB_OUTPUT
+          echo "success=true" >> $GITHUB_OUTPUT
+
+      # ============ DOCKER BUILD & PUSH ============
+      - name: Set up Docker Buildx
+        if: steps.detect.outputs.framework == 'docker'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image
+        if: steps.detect.outputs.framework == 'docker'
+        run: |
+          docker build -t ${{ steps.detect.outputs.repo_name }}:${{ github.sha }} .
+
+      # ============ COMMENT ON PR ============
+      - name: Comment Deployment URL on PR
+        if: github.event_name == 'pull_request' && (steps.railway.outputs.success == 'true' || steps.cloudflare-pages.outputs.success == 'true' || steps.cloudflare-workers.outputs.success == 'true' || steps.vercel.outputs.success == 'true' || steps.digitalocean.outputs.success == 'true')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const railwayUrl = '${{ steps.railway.outputs.url }}';
+            const pagesUrl = '${{ steps.cloudflare-pages.outputs.url }}';
+            const workersUrl = '${{ steps.cloudflare-workers.outputs.url }}';
+            const vercelUrl = '${{ steps.vercel.outputs.url }}';
+            const digitaloceanUrl = '${{ steps.digitalocean.outputs.url }}';
+            const platform = '${{ steps.detect.outputs.platform }}';
+            const deployUrl = railwayUrl || pagesUrl || workersUrl || vercelUrl || digitaloceanUrl || 'Deployment in progress...';
+
+            const platformEmoji = {
+              'railway': '🚂',
+              'cloudflare-pages': '📄',
+              'cloudflare-workers': '⚡',
+              'vercel': '▲',
+              'digitalocean': '🌊'
+            };
+
+            const body = `## ${platformEmoji[platform] || '🚀'} Preview Deployment Ready!
+
+            | Platform | URL |
+            |----------|-----|
+            | **${platform}** | ${deployUrl ? `[${deployUrl}](${deployUrl})` : 'Deploying...'} |
+
+            ---
+            🤖 *Auto-deployed by BlackRoad OS*`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c => c.body.includes('Preview Deployment Ready'));
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }

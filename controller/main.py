@@ -8,15 +8,17 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 import structlog
 import uvicorn
 
 from api import agents_router, tasks_router, websocket_router
 from api.websocket import dispatch_loop
 from core.registry import registry
+from core.auth import get_auth_config, check_rate_limit, generate_token
 from services.audit import audit, AuditEventType, AuditEvent
 
 # Configure structured logging
@@ -102,14 +104,50 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Get CORS origins from environment (comma-separated list)
+cors_origins = os.environ.get("CORS_ORIGINS", "").split(",")
+cors_origins = [origin.strip() for origin in cors_origins if origin.strip()]
+
+# Default to restrictive CORS in production, allow all in development
+if not cors_origins:
+    # Check if we're in development mode
+    if os.environ.get("ENV", "development") == "development":
+        cors_origins = ["*"]
+    else:
+        # Production default: only allow same-origin
+        cors_origins = [
+            "https://agent.blackroad.ai",
+            "https://api.blackroad.ai",
+            "https://app.blackroad.ai",
+        ]
+
 # CORS middleware for browser access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
+
+# Rate limiting middleware
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Apply rate limiting to all requests"""
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Skip rate limiting for health checks
+    if request.url.path in ["/health", "/"]:
+        return await call_next(request)
+
+    if not check_rate_limit(client_ip):
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={"detail": "Rate limit exceeded. Please try again later."}
+        )
+
+    return await call_next(request)
+
 
 # Include routers
 app.include_router(agents_router)
@@ -120,11 +158,13 @@ app.include_router(websocket_router)
 @app.get("/")
 async def root():
     """Root endpoint with system info"""
+    auth_config = get_auth_config()
     return {
         "name": "BlackRoad Agent OS",
         "version": "0.1.0",
         "agents": len(registry.get_all()),
         "agents_online": len(registry.get_online()),
+        "auth_enabled": auth_config.auth_enabled,
     }
 
 
@@ -133,6 +173,7 @@ async def health():
     """Health check endpoint"""
     from services.planner_config import PlannerConfig
     config = PlannerConfig.from_env()
+    auth_config = get_auth_config()
 
     return {
         "status": "healthy",
@@ -144,6 +185,35 @@ async def health():
             "online": len(registry.get_online()),
             "available": len(registry.get_available()),
         },
+        "security": {
+            "auth_enabled": auth_config.auth_enabled,
+            "cors_origins": cors_origins if cors_origins != ["*"] else "all (development)",
+        },
+    }
+
+
+@app.post("/auth/token")
+async def create_auth_token(request: Request):
+    """
+    Generate an API token for authenticated access.
+    In production, this should validate credentials first.
+    """
+    auth_config = get_auth_config()
+
+    if not auth_config.auth_enabled:
+        return {"token": "auth_disabled", "message": "Authentication is disabled"}
+
+    # In a real implementation, validate credentials here
+    # For now, generate a token with a default subject
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    subject = body.get("subject", "api_user")
+
+    token = generate_token(subject, "api")
+
+    return {
+        "token": token,
+        "type": "Bearer",
+        "expires_in": auth_config.token_expiration_hours * 3600,
     }
 
 
